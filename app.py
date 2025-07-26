@@ -3,40 +3,108 @@ import pandas as pd
 import sqlite3
 import json
 from datetime import datetime
-import plotly.express as px
-import plotly.graph_objects as go
-from langdetect import detect, DetectorFactory
-from langdetect.lang_detect_exception import LangDetectException
-import requests
-from io import StringIO
 import numpy as np
 
-# Set seed for consistent language detection
-DetectorFactory.seed = 0
+# Try to import optional dependencies
+try:
+    import plotly.express as px
+    import plotly.graph_objects as go
+    PLOTLY_AVAILABLE = True
+except ImportError:
+    PLOTLY_AVAILABLE = False
+    st.warning("Plotly not available. Install with: pip install plotly")
+
+try:
+    from langdetect import detect, DetectorFactory
+    from langdetect.lang_detect_exception import LangDetectException
+    DetectorFactory.seed = 0
+    LANGDETECT_AVAILABLE = True
+except ImportError:
+    LANGDETECT_AVAILABLE = False
+    st.warning("langdetect not available. Install with: pip install langdetect")
 
 # Indian language mapping
 INDIAN_LANGUAGES = {
-    'hi': 'Hindi',
-    'bn': 'Bengali', 
-    'te': 'Telugu',
-    'mr': 'Marathi',
-    'ta': 'Tamil',
-    'ur': 'Urdu',
-    'gu': 'Gujarati',
-    'kn': 'Kannada',
-    'ml': 'Malayalam',
-    'pa': 'Punjabi',
-    'or': 'Odia',
-    'as': 'Assamese',
-    'mai': 'Maithili',
-    'bh': 'Bhojpuri',
-    'ne': 'Nepali',
-    'sa': 'Sanskrit'
+    'hi': 'Hindi (हिन्दी)',
+    'bn': 'Bengali (বাংলা)', 
+    'te': 'Telugu (తెలుగు)',
+    'mr': 'Marathi (मराठी)',
+    'ta': 'Tamil (தமிழ்)',
+    'ur': 'Urdu (اردو)',
+    'gu': 'Gujarati (ગુજરાતી)',
+    'kn': 'Kannada (ಕನ್ನಡ)',
+    'ml': 'Malayalam (മലയാളം)',
+    'pa': 'Punjabi (ਪੰਜਾਬੀ)',
+    'or': 'Odia (ଓଡ଼ିଆ)',
+    'as': 'Assamese (অসমীয়া)',
+    'ne': 'Nepali (नेपाली)',
+    'sa': 'Sanskrit (संस्कृत)'
 }
+
+TEXT_CATEGORIES = [
+    "News & Journalism",
+    "Literature & Poetry", 
+    "Social Media",
+    "Government Documents",
+    "Academic Papers",
+    "Religious Texts",
+    "Folk Tales & Stories",
+    "Educational Content",
+    "Other"
+]
+
+class SimpleLanguageDetector:
+    """Simple language detector using basic patterns"""
+    
+    def __init__(self):
+        # Basic script detection patterns
+        self.script_patterns = {
+            'hi': r'[\u0900-\u097F]',  # Devanagari
+            'bn': r'[\u0980-\u09FF]',  # Bengali
+            'te': r'[\u0C00-\u0C7F]',  # Telugu
+            'ta': r'[\u0B80-\u0BFF]',  # Tamil
+            'mr': r'[\u0900-\u097F]',  # Devanagari (same as Hindi)
+            'gu': r'[\u0A80-\u0AFF]',  # Gujarati
+            'kn': r'[\u0C80-\u0CFF]',  # Kannada
+            'ml': r'[\u0D00-\u0D7F]',  # Malayalam
+            'pa': r'[\u0A00-\u0A7F]',  # Gurmukhi
+            'or': r'[\u0B00-\u0B7F]',  # Odia
+            'ur': r'[\u0600-\u06FF]',  # Arabic/Urdu
+        }
+    
+    def detect_language(self, text):
+        """Simple script-based language detection"""
+        import re
+        
+        if not text:
+            return "unknown", "Unknown"
+        
+        # Count characters for each script
+        script_scores = {}
+        total_chars = len(re.findall(r'\S', text))
+        
+        if total_chars == 0:
+            return "unknown", "Unknown"
+        
+        for lang_code, pattern in self.script_patterns.items():
+            matches = len(re.findall(pattern, text))
+            if matches > 0:
+                script_scores[lang_code] = matches / total_chars
+        
+        if script_scores:
+            best_lang = max(script_scores, key=script_scores.get)
+            if script_scores[best_lang] > 0.1:  # At least 10% of characters
+                return best_lang, INDIAN_LANGUAGES.get(best_lang, best_lang)
+        
+        return "unknown", "Unknown"
 
 class CorpusManager:
     def __init__(self):
         self.init_database()
+        if LANGDETECT_AVAILABLE:
+            self.detector = None  # Use langdetect
+        else:
+            self.detector = SimpleLanguageDetector()
     
     def init_database(self):
         """Initialize SQLite database for corpus storage"""
@@ -74,14 +142,17 @@ class CorpusManager:
     
     def detect_language(self, text):
         """Detect language of the given text"""
-        try:
-            detected_lang = detect(text)
-            if detected_lang in INDIAN_LANGUAGES:
-                return detected_lang, INDIAN_LANGUAGES[detected_lang]
-            else:
-                return detected_lang, "Other"
-        except LangDetectException:
-            return "unknown", "Unknown"
+        if LANGDETECT_AVAILABLE:
+            try:
+                detected_lang = detect(text)
+                if detected_lang in INDIAN_LANGUAGES:
+                    return detected_lang, INDIAN_LANGUAGES[detected_lang]
+                else:
+                    return detected_lang, detected_lang.title()
+            except LangDetectException:
+                return "unknown", "Unknown"
+        else:
+            return self.detector.detect_language(text)
     
     def add_text_to_corpus(self, text, source, category, contributor, manual_lang=None):
         """Add text to corpus database"""
@@ -124,9 +195,14 @@ class CorpusManager:
         conn = sqlite3.connect('bhasha_seva_corpus.db')
         
         # Overall stats
-        total_texts = pd.read_sql_query("SELECT COUNT(*) as count FROM corpus_data", conn).iloc[0]['count']
-        total_words = pd.read_sql_query("SELECT SUM(word_count) as total FROM corpus_data", conn).iloc[0]['total'] or 0
-        total_chars = pd.read_sql_query("SELECT SUM(char_count) as total FROM corpus_data", conn).iloc[0]['total'] or 0
+        total_texts_result = pd.read_sql_query("SELECT COUNT(*) as count FROM corpus_data", conn)
+        total_texts = total_texts_result.iloc[0]['count'] if not total_texts_result.empty else 0
+        
+        total_words_result = pd.read_sql_query("SELECT SUM(word_count) as total FROM corpus_data", conn)
+        total_words = total_words_result.iloc[0]['total'] if not total_words_result.empty and total_words_result.iloc[0]['total'] else 0
+        
+        total_chars_result = pd.read_sql_query("SELECT SUM(char_count) as total FROM corpus_data", conn)
+        total_chars = total_chars_result.iloc[0]['total'] if not total_chars_result.empty and total_chars_result.iloc[0]['total'] else 0
         
         # Language-wise stats
         lang_stats = pd.read_sql_query("SELECT * FROM language_stats ORDER BY total_words DESC", conn)
@@ -188,9 +264,16 @@ class CorpusManager:
         if format == 'csv':
             return df.to_csv(index=False)
         elif format == 'json':
-            return df.to_json(orient='records', indent=2)
+            return df.to_json(orient='records', indent=2, ensure_ascii=False)
         else:
             return df
+
+def create_simple_chart(data, chart_type="bar"):
+    """Create simple charts without plotly"""
+    if chart_type == "bar" and not data.empty:
+        st.bar_chart(data.set_index(data.columns[0]))
+    elif chart_type == "line" and not data.empty:
+        st.line_chart(data.set_index(data.columns[0]))
 
 def main():
     st.set_page_config(
@@ -206,14 +289,28 @@ def main():
     st.title("🇮🇳 Bhasha Seva - Indian Language Corpus Collector")
     st.markdown("*Preserving and collecting Indian language texts for research and development*")
     
+    # Show installation status
+    with st.expander("📋 Installation Status"):
+        st.write("**Required Dependencies:**")
+        st.write(f"✅ Streamlit: Available")
+        st.write(f"✅ Pandas: Available") 
+        st.write(f"✅ SQLite: Available")
+        st.write(f"✅ NumPy: Available")
+        
+        st.write("**Optional Dependencies:**")
+        st.write(f"{'✅' if PLOTLY_AVAILABLE else '❌'} Plotly: {'Available' if PLOTLY_AVAILABLE else 'Not Available'}")
+        st.write(f"{'✅' if LANGDETECT_AVAILABLE else '❌'} LangDetect: {'Available' if LANGDETECT_AVAILABLE else 'Not Available'}")
+        
+        if not PLOTLY_AVAILABLE or not LANGDETECT_AVAILABLE:
+            st.warning("Some features may be limited. Install missing packages for full functionality.")
+    
     # Sidebar navigation
     st.sidebar.title("Navigation")
     page = st.sidebar.selectbox("Choose a page", [
         "📝 Add Text", 
         "📊 Corpus Statistics", 
         "🔍 Search Corpus", 
-        "📥 Export Data",
-        "📈 Analytics Dashboard"
+        "📥 Export Data"
     ])
     
     if page == "📝 Add Text":
@@ -232,10 +329,7 @@ def main():
                 
             with col2:
                 source = st.text_input("Source", placeholder="e.g., Wikipedia, News, Book")
-                category = st.selectbox("Category", [
-                    "News", "Literature", "Social Media", "Government", 
-                    "Academic", "Religious", "Folk Tales", "Other"
-                ])
+                category = st.selectbox("Category", TEXT_CATEGORIES)
                 contributor = st.text_input("Contributor Name", placeholder="Your name")
                 
                 # Manual language selection (optional)
@@ -267,10 +361,7 @@ def main():
                 
                 with col2:
                     source = st.text_input("Source", placeholder="File name or origin")
-                    category = st.selectbox("Category", [
-                        "News", "Literature", "Social Media", "Government", 
-                        "Academic", "Religious", "Folk Tales", "Other"
-                    ])
+                    category = st.selectbox("Category", TEXT_CATEGORIES)
                     contributor = st.text_input("Contributor Name")
                 
                 if st.button("Process File"):
@@ -279,31 +370,32 @@ def main():
                             content = uploaded_file.read().decode('utf-8')
                             
                             # Split into sentences or paragraphs
-                            texts = [t.strip() for t in content.split('\n') if t.strip()]
+                            texts = [t.strip() for t in content.split('\n') if t.strip() and len(t.strip()) > 10]
                             
-                            progress_bar = st.progress(0)
-                            results = []
-                            
-                            for i, text in enumerate(texts):
-                                if len(text) > 10:  # Minimum text length
+                            if texts:
+                                progress_bar = st.progress(0)
+                                results = []
+                                
+                                for i, text in enumerate(texts):
                                     lang_code, lang_name = corpus_manager.add_text_to_corpus(
                                         text, source, category, contributor
                                     )
                                     results.append((lang_name, len(text.split())))
+                                    progress_bar.progress((i + 1) / len(texts))
                                 
-                                progress_bar.progress((i + 1) / len(texts))
-                            
-                            st.success(f"✅ Processed {len(results)} texts from file!")
-                            
-                            # Show summary
-                            if results:
-                                lang_summary = {}
-                                for lang, words in results:
-                                    lang_summary[lang] = lang_summary.get(lang, 0) + words
+                                st.success(f"✅ Processed {len(results)} texts from file!")
                                 
-                                st.write("**Summary:**")
-                                for lang, word_count in lang_summary.items():
-                                    st.write(f"- {lang}: {word_count} words")
+                                # Show summary
+                                if results:
+                                    lang_summary = {}
+                                    for lang, words in results:
+                                        lang_summary[lang] = lang_summary.get(lang, 0) + words
+                                    
+                                    st.write("**Summary:**")
+                                    for lang, word_count in lang_summary.items():
+                                        st.write(f"- {lang}: {word_count} words")
+                            else:
+                                st.warning("No valid text found in the file!")
                                     
                         except Exception as e:
                             st.error(f"Error processing file: {str(e)}")
@@ -326,24 +418,36 @@ def main():
         if not stats['language_stats'].empty:
             st.subheader("Language Distribution")
             
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                # Pie chart for texts
-                fig_pie = px.pie(stats['language_stats'], 
-                               values='total_texts', 
-                               names='language_name',
-                               title="Distribution by Number of Texts")
-                st.plotly_chart(fig_pie, use_container_width=True)
-            
-            with col2:
-                # Bar chart for words
-                fig_bar = px.bar(stats['language_stats'], 
-                               x='language_name', 
-                               y='total_words',
-                               title="Words per Language")
-                fig_bar.update_xaxis(tickangle=45)
-                st.plotly_chart(fig_bar, use_container_width=True)
+            if PLOTLY_AVAILABLE:
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    # Pie chart for texts
+                    fig_pie = px.pie(stats['language_stats'], 
+                                   values='total_texts', 
+                                   names='language_name',
+                                   title="Distribution by Number of Texts")
+                    st.plotly_chart(fig_pie, use_container_width=True)
+                
+                with col2:
+                    # Bar chart for words
+                    fig_bar = px.bar(stats['language_stats'], 
+                                   x='language_name', 
+                                   y='total_words',
+                                   title="Words per Language")
+                    fig_bar.update_xaxis(tickangle=45)
+                    st.plotly_chart(fig_bar, use_container_width=True)
+            else:
+                # Use simple charts
+                st.write("**Texts per Language:**")
+                chart_data = stats['language_stats'][['language_name', 'total_texts']]
+                if not chart_data.empty:
+                    st.bar_chart(chart_data.set_index('language_name'))
+                
+                st.write("**Words per Language:**")
+                chart_data2 = stats['language_stats'][['language_name', 'total_words']]
+                if not chart_data2.empty:
+                    st.bar_chart(chart_data2.set_index('language_name'))
             
             # Language statistics table
             st.subheader("Detailed Language Statistics")
@@ -352,11 +456,15 @@ def main():
         # Category distribution
         if not stats['category_stats'].empty:
             st.subheader("Category Distribution")
-            fig_category = px.bar(stats['category_stats'], 
-                                x='category', 
-                                y='count',
-                                title="Texts per Category")
-            st.plotly_chart(fig_category, use_container_width=True)
+            if PLOTLY_AVAILABLE:
+                fig_category = px.bar(stats['category_stats'], 
+                                    x='category', 
+                                    y='count',
+                                    title="Texts per Category")
+                st.plotly_chart(fig_category, use_container_width=True)
+            else:
+                chart_data = stats['category_stats'][['category', 'count']]
+                st.bar_chart(chart_data.set_index('category'))
     
     elif page == "🔍 Search Corpus":
         st.header("Search Corpus")
@@ -368,13 +476,13 @@ def main():
         
         with col2:
             stats = corpus_manager.get_corpus_stats()
-            available_languages = ["All"] + list(stats['language_stats']['language_code'].unique()) if not stats['language_stats'].empty else ["All"]
+            available_languages = ["All"]
+            if not stats['language_stats'].empty:
+                available_languages.extend(list(stats['language_stats']['language_code'].unique()))
             selected_language = st.selectbox("Filter by Language", available_languages)
         
         with col3:
-            available_categories = ["All", "News", "Literature", "Social Media", 
-                                  "Government", "Academic", "Religious", "Folk Tales", "Other"]
-            selected_category = st.selectbox("Filter by Category", available_categories)
+            selected_category = st.selectbox("Filter by Category", ["All"] + TEXT_CATEGORIES)
         
         if st.button("Search") and search_query:
             results = corpus_manager.search_corpus(search_query, selected_language, selected_category)
@@ -399,7 +507,9 @@ def main():
         
         with col1:
             stats = corpus_manager.get_corpus_stats()
-            available_languages = ["All"] + list(stats['language_stats']['language_code'].unique()) if not stats['language_stats'].empty else ["All"]
+            available_languages = ["All"]
+            if not stats['language_stats'].empty:
+                available_languages.extend(list(stats['language_stats']['language_code'].unique()))
             export_language = st.selectbox("Select Language to Export", available_languages)
         
         with col2:
@@ -429,46 +539,26 @@ def main():
             except Exception as e:
                 st.error(f"Export failed: {str(e)}")
     
-    elif page == "📈 Analytics Dashboard":
-        st.header("Analytics Dashboard")
-        
-        stats = corpus_manager.get_corpus_stats()
-        
-        if stats['total_texts'] > 0:
-            # Time series analysis would require date-based queries
-            st.subheader("Corpus Growth Over Time")
-            st.info("📊 Advanced analytics features coming soon!")
-            
-            # Language diversity metrics
-            st.subheader("Language Diversity Metrics")
-            
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                if not stats['language_stats'].empty:
-                    # Calculate diversity index
-                    total_texts = stats['language_stats']['total_texts'].sum()
-                    proportions = stats['language_stats']['total_texts'] / total_texts
-                    diversity_index = -sum(p * np.log(p) for p in proportions if p > 0)
-                    
-                    st.metric("Shannon Diversity Index", f"{diversity_index:.2f}")
-                    st.metric("Most Represented Language", 
-                             stats['language_stats'].iloc[0]['language_name'])
-            
-            with col2:
-                # Word count distribution
-                if not stats['language_stats'].empty:
-                    fig_dist = px.histogram(stats['language_stats'], 
-                                          x='total_words',
-                                          title="Word Count Distribution")
-                    st.plotly_chart(fig_dist, use_container_width=True)
-        else:
-            st.info("No data available yet. Start by adding some texts to the corpus!")
-    
     # Footer
     st.sidebar.markdown("---")
     st.sidebar.markdown("**Bhasha Seva** 🇮🇳")
     st.sidebar.markdown("Preserving Indian Languages")
+    
+    # Installation instructions in sidebar
+    with st.sidebar.expander("📦 Installation Guide"):
+        st.markdown("""
+        **To install missing packages:**
+        
+        ```bash
+        pip install plotly
+        pip install langdetect
+        ```
+        
+        **Full installation:**
+        ```bash
+        pip install streamlit pandas plotly langdetect numpy sqlite3
+        ```
+        """)
 
 if __name__ == "__main__":
     main()
