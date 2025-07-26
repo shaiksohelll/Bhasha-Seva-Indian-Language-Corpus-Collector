@@ -9,7 +9,7 @@ from langdetect import detect, DetectorFactory
 from langdetect.lang_detect_exception import LangDetectException
 import requests
 from io import StringIO
-import base64
+import numpy as np
 
 # Set seed for consistent language detection
 DetectorFactory.seed = 0
@@ -221,7 +221,7 @@ def main():
         
         # Input methods
         input_method = st.radio("Choose input method:", 
-                               ["Manual Text Entry", "File Upload", "URL Import"])
+                               ["Manual Text Entry", "File Upload"])
         
         if input_method == "Manual Text Entry":
             col1, col2 = st.columns([2, 1])
@@ -368,7 +368,7 @@ def main():
         
         with col2:
             stats = corpus_manager.get_corpus_stats()
-            available_languages = ["All"] + list(stats['language_stats']['language_code'].unique())
+            available_languages = ["All"] + list(stats['language_stats']['language_code'].unique()) if not stats['language_stats'].empty else ["All"]
             selected_language = st.selectbox("Filter by Language", available_languages)
         
         with col3:
@@ -399,7 +399,7 @@ def main():
         
         with col1:
             stats = corpus_manager.get_corpus_stats()
-            available_languages = ["All"] + list(stats['language_stats']['language_code'].unique())
+            available_languages = ["All"] + list(stats['language_stats']['language_code'].unique()) if not stats['language_stats'].empty else ["All"]
             export_language = st.selectbox("Select Language to Export", available_languages)
         
         with col2:
@@ -457,10 +457,11 @@ def main():
             
             with col2:
                 # Word count distribution
-                fig_dist = px.histogram(stats['language_stats'], 
-                                      x='total_words',
-                                      title="Word Count Distribution")
-                st.plotly_chart(fig_dist, use_container_width=True)
+                if not stats['language_stats'].empty:
+                    fig_dist = px.histogram(stats['language_stats'], 
+                                          x='total_words',
+                                          title="Word Count Distribution")
+                    st.plotly_chart(fig_dist, use_container_width=True)
         else:
             st.info("No data available yet. Start by adding some texts to the corpus!")
     
@@ -470,3 +471,4 @@ def main():
     st.sidebar.markdown("Preserving Indian Languages")
 
 if __name__ == "__main__":
+    main()
