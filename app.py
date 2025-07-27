@@ -1,141 +1,247 @@
 import streamlit as st
-from googletrans import Translator, LANGUAGES
+from streamlit_webrtc import webrtc_streamer, WebRtcMode, AudioProcessorBase
+import numpy as np
 import speech_recognition as sr
 from pydub import AudioSegment
 import io
+import os
+import pandas as pd
+import time
+import random
 
-# --- Page Configuration ---
+# --- PAGE CONFIGURATION ---
 st.set_page_config(
-    page_title="Bhasha Seva – Translator",
+    page_title="Bhasha Seva",
     page_icon="🗣️",
-    layout="centered",
-    initial_sidebar_state="auto",
+    layout="wide",
 )
 
-# --- App Title and Description ---
-st.title("Bhasha Seva – Translator 🗣️")
-st.markdown("""
-This tool translates Telugu text and audio into English. 
-You can either type the text directly or provide an audio input in Telugu.
-""")
-st.markdown("---")
+# --- PROJECT ASSETS & DATA ---
 
-# --- Initialize Translator ---
-# Create a translator object. The 'proxies' parameter can be used if you are behind a proxy.
-# For most users, this is not necessary.
-translator = Translator()
+# Create a directory to save the collected data
+if not os.path.exists("corpus_data"):
+    os.makedirs("corpus_data")
 
-# --- Functions for Translation and Speech Recognition ---
+# Path to the CSV file for storing metadata
+CSV_PATH = "corpus_data/transcriptions.csv"
 
-def translate_text(text, dest_lang):
-    """
-    Translates the given text to the destination language.
-    """
-    try:
-        # Detect the source language of the input text
-        detected_lang = translator.detect(text).lang
-        # Translate the text to the destination language
-        translated = translator.translate(text, src=detected_lang, dest=dest_lang)
-        # Return the translated text and the detected source language
-        return translated.text, detected_lang
-    except Exception as e:
-        # Handle exceptions during translation
-        st.error(f"An error occurred during translation: {e}")
-        return None, None
+# Sample prompts in different Indian languages
+PROMPTS = {
+    "Hindi": [
+        "नमस्ते, आपका स्वागत है।",
+        "एकता में ही बल है।",
+        "चलिए भारतीय भाषाओं के लिए एक बेहतर भविष्य का निर्माण करें।",
+        "यह एक सुंदर दिन है और मैं बहुत खुश हूँ।",
+        "कृपया इस वाक्य को स्पष्ट रूप से पढ़ें।",
+    ],
+    "Telugu": [
+        "నమస్కారం, మీకు స్వాగతం.",
+        "ఐకమత్యమే మహాబలం.",
+        "భారతీయ భాషల కోసం ఒక మంచి భవిష్యత్తును నిర్మిద్దాం.",
+        "ఇది ఒక అందమైన రోజు మరియు నేను చాలా సంతోషంగా ఉన్నాను.",
+        "దయచేసి ఈ వాక్యాన్ని స్పష్టంగా చదవండి.",
+    ],
+    "Tamil": [
+        "வணக்கம், வரவேற்கிறோம்.",
+        "ஒற்றுமையே வலிமை.",
+        "இந்திய மொழிகளுக்கு ஒரு சிறந்த எதிர்காலத்தை உருவாக்குவோம்.",
+        "இது ஒரு அழகான நாள், நான் மிகவும் மகிழ்ச்சியாக இருக்கிறேன்.",
+        "தயவுசெய்து இந்த வாக்கியத்தை தெளிவாக படிக்கவும்.",
+    ],
+    "Bengali": [
+        "নমস্কার, আপনাকে স্বাগত।",
+        "একতাই বল।",
+        "আসুন ভারতীয় ভাষার জন্য একটি ভালো ভবিষ্যৎ তৈরি করি।",
+        "এটি একটি সুন্দর দিন এবং আমি খুব খুশি।",
+        "অনুগ্রহ করে এই বাক্যটি স্পষ্টভাবে পড়ুন।",
+    ]
+}
 
-def transcribe_audio(audio_bytes):
-    """
-    Transcribes the given audio bytes to text using Google's Speech Recognition.
-    """
-    # Initialize the recognizer
+# --- AUDIO PROCESSING CLASS ---
+
+# This class will handle receiving audio frames from the browser
+class AudioRecorder(AudioProcessorBase):
+    def __init__(self) -> None:
+        # A list to store audio frames
+        self.audio_frames = []
+        # A lock to prevent race conditions when accessing the list
+        self._lock = True
+
+    # This method is called for each audio frame
+    def recv(self, frame):
+        if self._lock:
+            # Convert audio frame to a NumPy array of integers
+            self.audio_frames.append(frame.to_ndarray())
+        return frame
+
+    # Method to get all collected audio frames
+    def get_audio_frames(self):
+        # Temporarily unlock to prevent new frames from being added
+        self._lock = False
+        # Concatenate all frames into a single NumPy array
+        audio_array = np.concatenate(self.audio_frames)
+        # Clear the list for the next recording
+        self.audio_frames = []
+        # Re-lock for the next recording session
+        self._lock = True
+        return audio_array
+
+# --- HELPER FUNCTIONS ---
+
+def initialize_csv():
+    """Creates the CSV file with headers if it doesn't exist."""
+    if not os.path.exists(CSV_PATH):
+        df = pd.DataFrame(columns=["timestamp", "language", "prompt_text", "audio_filename", "transcribed_text"])
+        df.to_csv(CSV_PATH, index=False)
+
+def save_data(language, prompt, audio_bytes, transcription):
+    """Saves the audio file and appends the metadata to the CSV."""
+    timestamp = int(time.time())
+    audio_filename = f"{timestamp}_{language}.wav"
+    audio_filepath = os.path.join("corpus_data", audio_filename)
+
+    # Save the audio file
+    with open(audio_filepath, "wb") as f:
+        f.write(audio_bytes)
+
+    # Append data to CSV
+    df = pd.read_csv(CSV_PATH)
+    new_row = pd.DataFrame([{
+        "timestamp": timestamp,
+        "language": language,
+        "prompt_text": prompt,
+        "audio_filename": audio_filename,
+        "transcribed_text": transcription
+    }])
+    df = pd.concat([df, new_row], ignore_index=True)
+    df.to_csv(CSV_PATH, index=False)
+
+def transcribe_audio(audio_array, sample_rate):
+    """Converts audio array to text using SpeechRecognition."""
+    # Convert numpy array to AudioSegment
+    audio_segment = AudioSegment(
+        data=audio_array.tobytes(),
+        sample_width=audio_array.dtype.itemsize,
+        frame_rate=sample_rate,
+        channels=1
+    )
+
+    # Export to a byte buffer in WAV format
+    buffer = io.BytesIO()
+    audio_segment.export(buffer, format="wav")
+    buffer.seek(0)
+
+    # Use SpeechRecognition to transcribe
     r = sr.Recognizer()
     try:
-        # Convert audio bytes to a format that speech_recognition can handle
-        # The audio is first loaded into an AudioSegment object
-        audio_segment = AudioSegment.from_file(io.BytesIO(audio_bytes))
-        # Export the audio segment to a WAV format in memory
-        wav_io = io.BytesIO()
-        audio_segment.export(wav_io, format="wav")
-        wav_io.seek(0)
-
-        # Use the WAV data from memory as the audio source
-        with sr.AudioFile(wav_io) as source:
-            # Record the audio data from the source
+        with sr.AudioFile(buffer) as source:
             audio_data = r.record(source)
-            # Recognize the speech in the audio data using Google's engine
-            # The language is specified as 'te-IN' for Telugu (India)
-            text = r.recognize_google(audio_data, language='te-IN')
-            return text
+        # Recognize using Google Web Speech API
+        # Note: This requires an internet connection.
+        # For better performance and privacy, consider models like Whisper.
+        text = r.recognize_google(audio_data, language=st.session_state.lang_code)
+        return text, buffer.getvalue()
     except sr.UnknownValueError:
-        # Handle cases where the speech is unintelligible
-        st.warning("Could not understand the audio. Please try again.")
-        return None
+        return "AI could not understand the audio. Please try again.", None
     except sr.RequestError as e:
-        # Handle errors with the speech recognition service
-        st.error(f"Could not request results from the speech recognition service; {e}")
-        return None
+        return f"Could not request results from the AI service; {e}", None
     except Exception as e:
-        # Handle other exceptions
-        st.error(f"An error occurred during audio processing: {e}")
-        return None
+        return f"An unexpected error occurred: {e}", None
 
-# --- UI for Input Selection ---
-input_method = st.radio(
-    "Choose your input method:",
-    ("Text Input", "Audio Input")
-)
+# --- STREAMLIT APP UI ---
 
-st.markdown("---")
+st.title("🗣️ Bhasha Seva – Indian Language Corpus Collector")
+st.markdown("""
+Welcome! This app helps build a rich dataset for Indian languages.
+Your contribution will improve AI tools like speech recognition and translation for everyone.
+**How it works:**
+1.  Select a language.
+2.  Click **Start Recording** and read the provided sentence aloud.
+3.  Click **Stop Recording** when you're done.
+4.  The app will transcribe your voice and save the data.
+""")
 
-# --- Processing based on Input Method ---
+st.divider()
 
-if input_method == "Text Input":
-    st.subheader("Translate Telugu Text to English")
-    # Text area for user input
-    text_to_translate = st.text_area("Enter Telugu text here:", height=150)
+# Initialize CSV file
+initialize_csv()
 
-    if st.button("Translate Text", type="primary"):
-        if text_to_translate:
-            with st.spinner("Translating..."):
-                # Translate the input text
-                translated_text, detected_lang = translate_text(text_to_translate, 'en')
-                if translated_text:
-                    st.success("Translation Complete!")
-                    # Display the results
-                    st.markdown("### Results")
-                    st.write(f"**Original (Telugu):** {text_to_translate}")
-                    st.write(f"**Translation (English):** {translated_text}")
-        else:
-            st.warning("Please enter some text to translate.")
+# --- MAIN APP LOGIC ---
 
-elif input_method == "Audio Input":
-    st.subheader("Translate Telugu Audio to English")
-    # Audio input widget
-    audio_file = st.file_uploader("Upload a Telugu audio file (WAV, MP3):", type=['wav', 'mp3', 'ogg'])
+col1, col2 = st.columns([1, 2])
 
-    if audio_file is not None:
-        st.audio(audio_file, format='audio/wav')
-        
-        if st.button("Transcribe and Translate Audio", type="primary"):
-            with st.spinner("Processing Audio... Please Wait."):
-                # Read the audio file bytes
-                audio_bytes = audio_file.read()
-                
-                # Transcribe the audio to get Telugu text
-                telugu_text = transcribe_audio(audio_bytes)
+with col1:
+    st.subheader("1. Select Your Language")
+    language_map = {"Hindi": "hi-IN", "Telugu": "te-IN", "Tamil": "ta-IN", "Bengali": "bn-IN"}
+    selected_language = st.selectbox("Choose a language to contribute to:", list(language_map.keys()))
+    st.session_state.lang_code = language_map[selected_language]
 
-                if telugu_text:
-                    st.info(f"**Transcribed Telugu Text:** {telugu_text}")
-                    with st.spinner("Translating Text..."):
-                        # Translate the transcribed text to English
-                        english_text, _ = translate_text(telugu_text, 'en')
-                        if english_text:
-                            st.success("Translation Complete!")
-                            # Display the final results
-                            st.markdown("### Results")
-                            st.write(f"**Subtitles (Telugu):** {telugu_text}")
-                            st.write(f"**Translation (English):** {english_text}")
+    # Display a random prompt for the selected language
+    if 'prompt' not in st.session_state or st.session_state.get('lang') != selected_language:
+        st.session_state.prompt = random.choice(PROMPTS[selected_language])
+        st.session_state.lang = selected_language
 
-# --- Footer ---
-st.markdown("---")
-st.markdown("*Powered by Google Translate and Speech Recognition.*")
+    st.subheader("2. Read This Sentence Aloud")
+    st.info(f"**Prompt:** \"{st.session_state.prompt}\"")
+
+    # Button to get a new prompt
+    if st.button("Get a New Sentence"):
+        st.session_state.prompt = random.choice(PROMPTS[selected_language])
+        st.rerun()
+
+
+with col2:
+    st.subheader("3. Record Your Voice")
+
+    # webrtc_streamer for audio recording
+    webrtc_ctx = webrtc_streamer(
+        key="audio-recorder",
+        mode=WebRtcMode.SENDONLY,
+        audio_processor_factory=AudioRecorder,
+        media_stream_constraints={"audio": True, "video": False},
+        send_audio_frame_rate=16000 # Set sample rate
+    )
+
+    st.subheader("4. Review and Submit")
+
+    if not webrtc_ctx.state.playing:
+        st.warning("Click 'Start Recording' above to begin.")
+    
+    if webrtc_ctx.audio_processor:
+        # Check if there are audio frames collected
+        if st.button("Process My Voice Recording"):
+            with st.spinner("AI is transcribing your voice... Please wait."):
+                audio_processor = webrtc_ctx.audio_processor
+                audio_array = audio_processor.get_audio_frames()
+
+                if audio_array is not None and len(audio_array) > 0:
+                    sample_rate = webrtc_ctx.send_audio_frame_rate
+                    
+                    # Transcribe the audio
+                    transcription, audio_bytes = transcribe_audio(audio_array, sample_rate)
+
+                    st.session_state.transcription = transcription
+                    st.session_state.audio_bytes = audio_bytes
+                else:
+                    st.error("No audio was recorded. Please try again.")
+
+    if 'transcription' in st.session_state:
+        st.markdown("**Your Original Prompt:**")
+        st.write(f"> _{st.session_state.prompt}_")
+        st.markdown("**AI-Generated Transcription:**")
+        st.write(f"> _{st.session_state.transcription}_")
+
+        if st.session_state.audio_bytes:
+            st.audio(st.session_state.audio_bytes, format='audio/wav')
+            if st.button("✅ Looks Good! Save Contribution"):
+                save_data(selected_language, st.session_state.prompt, st.session_state.audio_bytes, st.session_state.transcription)
+                st.success("Thank you! Your contribution has been saved.")
+                # Clear state for next recording
+                del st.session_state.transcription
+                del st.session_state.audio_bytes
+                # Get a new prompt automatically
+                st.session_state.prompt = random.choice(PROMPTS[selected_language])
+                st.rerun()
+
+st.divider()
+st.markdown("Made with ❤️ for the future of Indian languages.")
